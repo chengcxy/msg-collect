@@ -86,7 +86,6 @@ func Produce(ctx context.Context, messageChan chan map[string]interface{}) {
 				"ts": time.Now().UnixNano(),
 			}
 			messageChan <- msg
-			time.Sleep(10 * time.Millisecond) // 模拟节奏
 		}
 	}
 }
