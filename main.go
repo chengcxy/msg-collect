@@ -78,6 +78,8 @@ func Produce(ctx context.Context, messageChan chan map[string]interface{}) {
 	defer func(){
 		close(messageChan)
 	}()
+	dbs := []string{"db1", "db2"}
+	tables := []string{"table1", "table2"}
 	for {
 		select {
 		case <-ctx.Done():
@@ -85,29 +87,47 @@ func Produce(ctx context.Context, messageChan chan map[string]interface{}) {
 			return
 		default:
 			msg := map[string]interface{}{
-				"id": rand.Intn(100),
-				"ts": time.Now().UnixNano(),
+				"id":         rand.Intn(1000),
+				"ts":         time.Now().UnixNano(),
+				"db":         dbs[rand.Intn(len(dbs))],
+				"table_name": tables[rand.Intn(len(tables))],
 			}
 			messageChan <- msg
 		}
 	}
 }
 
-// doBulk 写入一批数据到文件
-func doBulk(fw *FileWriter, reqs []map[string]interface{}) error {
-	if len(reqs) == 0 {
-		return nil
+// doBulk 将数据按 db.table 分组写入对应文件
+func doBulk(writers map[string]*FileWriter, reqs []map[string]interface{}) error {
+	grouped := make(map[string][]string)
+
+	// 分组
+	for _, req := range reqs {
+		db, _ := req["db"].(string)
+		table, _ := req["table_name"].(string)
+		if db == "" || table == "" {
+			continue
+		}
+		key := fmt.Sprintf("%s.%s", db, table)
+		jsonLine, _ := json.Marshal(req)
+		grouped[key] = append(grouped[key], string(jsonLine))
 	}
-	lines := make([]string, len(reqs))
-	for i, req := range reqs {
-		line, _ := json.Marshal(req)
-		lines[i] = string(line)
+
+	// 写入
+	for key, lines := range grouped {
+		data := strings.Join(lines, "\n") + "\n"
+		safeKey := strings.ReplaceAll(key, ".", "_") // 文件名安全
+		fw, ok := writers[key]
+		if !ok {
+			fw = NewFileWriter(safeKey)
+			writers[key] = fw
+		}
+		if err := fw.Write([]byte(data)); err != nil {
+			fmt.Printf("[ERROR] Write failed for %s: %v\n", key, err)
+		} else {
+			fmt.Printf("[INFO] Wrote %d records to %s\n", len(lines), key)
+		}
 	}
-	data := strings.Join(lines, "\n") + "\n"
-	if err := fw.Write([]byte(data)); err != nil {
-		return fmt.Errorf("file write error: %w", err)
-	}
-	fmt.Printf("[INFO] Wrote %d records (%.2f KB)\n", len(reqs), float64(len(data))/1024)
 	return nil
 }
 
@@ -120,36 +140,36 @@ func consumer(ctx context.Context, messageChan chan map[string]interface{}, done
 	}()
 
 	reqs := make([]map[string]interface{}, 0, 1024)
-	fw := NewFileWriter("binlog_data")
-	defer fw.Close()
-
+	writers := make(map[string]*FileWriter)
 	for {
 		select {
 		case <-ctx.Done():
 			fmt.Println("[INFO] Consumer received cancel signal.")
 			if len(reqs) > 0 {
-				_ = doBulk(fw, reqs)
+				_ = doBulk(writers, reqs)
+			}
+			for _, w := range writers {
+				w.Close()
 			}
 			return
 		case v, ok := <-messageChan:
 			if !ok {
 				if len(reqs) > 0 {
-					_ = doBulk(fw, reqs)
+					_ = doBulk(writers, reqs)
+				}
+				for _, w := range writers {
+					w.Close()
 				}
 				return
 			}
 			reqs = append(reqs, v)
 			if len(reqs) >= bulkSize {
-				if err := doBulk(fw, reqs); err != nil {
-					fmt.Printf("[ERROR] Bulk write failed: %v\n", err)
-				}
+				_ = doBulk(writers, reqs)
 				reqs = reqs[:0]
 			}
 		case <-ticker.C:
 			if len(reqs) > 0 {
-				if err := doBulk(fw, reqs); err != nil {
-					fmt.Printf("[ERROR] Timed bulk write failed: %v\n", err)
-				}
+				_ = doBulk(writers, reqs)
 				reqs = reqs[:0]
 			}
 		}
@@ -170,7 +190,6 @@ func main() {
 		fmt.Println("[INFO] Received kill signal, exiting...")
 		cancel()
 	}()
-
 	<-done
 	fmt.Println("[INFO] Program exited cleanly.")
 }
