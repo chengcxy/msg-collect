@@ -75,6 +75,9 @@ func (fw *FileWriter) Close() {
 
 // Produce 模拟生成数据
 func Produce(ctx context.Context, messageChan chan map[string]interface{}) {
+	defer func(){
+		close(messageChan)
+	}()
 	for {
 		select {
 		case <-ctx.Done():
@@ -166,8 +169,6 @@ func main() {
 		<-sigs
 		fmt.Println("[INFO] Received kill signal, exiting...")
 		cancel()
-		// 关闭生产通道，通知 consumer 没有更多数据
-		close(messageChan)
 	}()
 
 	<-done
